@@ -9,8 +9,8 @@ char output_A_file[] = "outputs/A.txt";
 char output_B_file[] = "outputs/B.txt";
 char output_C_serial_file[] = "outputs/C_serial.txt";
 char output_C_parallel_file[] = "outputs/C_parallel.txt";
+char output_C_parallel_inner_file[] = "outputs/C_parallel_inner.txt";
 
-// UTILITY ------------------------------------------------------------------------
 struct RowCol {
     int row;
     int col;
@@ -45,15 +45,14 @@ void print_to_command(int* matrix, struct RowCol row_col) {
     printf("\n\n");
 }
 
-// create the arrays and return the row col structure that fits the given array
 struct RowCol initalize_matrix_values(int *matrix, int type, int row, int col) {
     int N = row * col;
 
     for (int i = 0; i < N; i++) {
-        if (type == 0) { // matrix only has 0s
+        if (type == 0) {
             matrix[i] = 0;
-        } else { // matrix has random values
-            matrix[i] = rand() % (VALUEMAX + 1); // value [0, VALUEMAX]
+        } else {
+            matrix[i] = rand() % (VALUEMAX + 1);
         }
     }
 
@@ -67,7 +66,6 @@ int confirm_input(int default_value, char user_provided[]) {
     char ch;
     int status;
 
-    // checking if the input is an int
     status = sscanf(user_provided, "%d%c", &n, &ch);
     if (status != 1) {
         printf("The provided user inputer was not an int, the program will use the default value.\n");
@@ -78,12 +76,10 @@ int confirm_input(int default_value, char user_provided[]) {
     return atoi(user_provided);
 }
 
-// converts a row and column to an index
 __host__ __device__ int row_col_to_index(int row, int col, int row_width) {
     return (row * row_width) + col;
 }
 
-// converts an index into a row and column
 __host__ __device__ struct RowCol index_to_row_col(int index, int row_width) {
     struct RowCol values;
 
@@ -93,18 +89,24 @@ __host__ __device__ struct RowCol index_to_row_col(int index, int row_width) {
     return values;
 }
 
-// MULTIPLICATION -----------------------------------------------------------------
+int compare_matrices(int* X, int* Y, int N) {
+    int mismatches = 0;
+    for (int i = 0; i < N; i++) {
+        if (X[i] != Y[i]) {
+            mismatches++;
+        }
+    }
+    return mismatches;
+}
 
 int dot_product(int* A, int* B, struct RowCol row_col_C, int index, int m) {
     int sum = 0;
 
-    // convert the current index to row col values
     struct RowCol current_row_col = index_to_row_col(index, row_col_C.col);
 
     for (int i = 0; i < m; i++) {
-        // get the index for A and B that corresponds to the current row and column
-        int A_index = row_col_to_index(current_row_col.row, i, m); // m is the rowWidth of A
-        int B_index = row_col_to_index(i, current_row_col.col, row_col_C.col); // row_col_C.col is the rowWidth of B
+        int A_index = row_col_to_index(current_row_col.row, i, m);
+        int B_index = row_col_to_index(i, current_row_col.col, row_col_C.col);
 
         sum += (A[A_index] * B[B_index]);
     }
@@ -120,15 +122,16 @@ void serial_multiplication(int* A, int* B, int* C, struct RowCol row_col_C, int 
 
 __global__ void kernel_dot_product(int* A, int* B, int* C, struct RowCol row_col_C, int m) {
     int index = blockDim.x * blockIdx.x + threadIdx.x;
+    int N = row_col_C.row * row_col_C.col;
+    if (index >= N) return;
+
     int sum = 0;
 
-    // convert the current index to row col values
     struct RowCol current_row_col = index_to_row_col(index, row_col_C.col);
 
     for (int i = 0; i < m; i++) {
-        // get the index for A and B that corresponds to the current row and column
-        int A_index = row_col_to_index(current_row_col.row, i, m); // m is the rowWidth of A
-        int B_index = row_col_to_index(i, current_row_col.col, row_col_C.col); // col_amount_C is the rowWidth of B
+        int A_index = row_col_to_index(current_row_col.row, i, m);
+        int B_index = row_col_to_index(i, current_row_col.col, row_col_C.col);
 
         sum += (A[A_index] * B[B_index]);
     }
@@ -136,7 +139,7 @@ __global__ void kernel_dot_product(int* A, int* B, int* C, struct RowCol row_col
     C[index] = sum;
 }
 
-void parallel_multiplication(int *A, int *B, int *C, struct RowCol row_col_C, int m) {
+void parallel_multiplication(int *A, int *B, int *C, struct RowCol row_col_C, int m, float *kernel_ms_out) {
     int N = row_col_C.row * row_col_C.col;
     int *dev_A, *dev_B, *dev_C;
 
@@ -151,21 +154,88 @@ void parallel_multiplication(int *A, int *B, int *C, struct RowCol row_col_C, in
     cudaMemcpy(dev_A, A, size_A, cudaMemcpyHostToDevice);
     cudaMemcpy(dev_B, B, size_B, cudaMemcpyHostToDevice);
 
-    // Mathematical Relation for Grid Sizing 
     int threadsPerBlock = 256;
     int blocksPerGrid = (N + threadsPerBlock - 1) / threadsPerBlock;
 
-    kernel_dot_product << <blocksPerGrid, threadsPerBlock >> > (dev_A, dev_B, dev_C, row_col_C, m);
+    // Kernel-only GPU timing
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaEventRecord(start);
+
+    kernel_dot_product<<<blocksPerGrid, threadsPerBlock>>>(dev_A, dev_B, dev_C, row_col_C, m);
+
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(kernel_ms_out, start, stop);
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+
+    // Keep host timing accurate
+    cudaDeviceSynchronize();
 
     cudaMemcpy(C, dev_C, size_C, cudaMemcpyDeviceToHost);
+
+    cudaFree(dev_A);
+    cudaFree(dev_B);
+    cudaFree(dev_C);
 }
 
-// MAIN ---------------------------------------------------------------------------
+// Inner-loop kernel: one thread per dot-product term
+__global__ void kernel_dot_product_inner(int* A, int* B, int* C, struct RowCol row_col_C, struct RowCol current_row_col, int m, int current_C_index) {
+    int index = blockDim.x * blockIdx.x + threadIdx.x;
+    if (index >= m) return;
 
-// user allowed inputs:
-//  1: the number of rows in the first matrix
-//  2: the number of columns in the first matrix and the number of rows in the second matrix
-//  3: the number of columns in the second matrix
+    int A_index = row_col_to_index(current_row_col.row, index, m);
+    int B_index = row_col_to_index(index, current_row_col.col, row_col_C.col);
+
+    atomicAdd(&C[current_C_index], A[A_index] * B[B_index]);
+}
+
+void parallel_multiplication_inner(int *A, int *B, int *C, struct RowCol row_col_C, int m, float *kernel_ms_out) {
+    int N = row_col_C.row * row_col_C.col;
+    int *dev_A, *dev_B, *dev_C;
+
+    int size_A = (row_col_C.row * m) * sizeof(int);
+    int size_B = (m * row_col_C.col) * sizeof(int);
+    int size_C = N * sizeof(int);
+
+    cudaMalloc((void**)&dev_A, size_A);
+    cudaMalloc((void**)&dev_B, size_B);
+    cudaMalloc((void**)&dev_C, size_C);
+
+    cudaMemcpy(dev_A, A, size_A, cudaMemcpyHostToDevice);
+    cudaMemcpy(dev_B, B, size_B, cudaMemcpyHostToDevice);
+    // atomicAdd needs a zeroed output buffer
+    cudaMemset(dev_C, 0, size_C);
+
+    int threadsPerBlock = 256;
+    int blocksPerGrid = (m + threadsPerBlock - 1) / threadsPerBlock;
+
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaEventRecord(start);
+
+    for (int current_C_index = 0; current_C_index < N; current_C_index++) {
+        struct RowCol current_row_col = index_to_row_col(current_C_index, row_col_C.col);
+        kernel_dot_product_inner<<<blocksPerGrid, threadsPerBlock>>>(dev_A, dev_B, dev_C, row_col_C, current_row_col, m, current_C_index);
+    }
+
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(kernel_ms_out, start, stop);
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+
+    cudaDeviceSynchronize();
+
+    cudaMemcpy(C, dev_C, size_C, cudaMemcpyDeviceToHost);
+
+    cudaFree(dev_A);
+    cudaFree(dev_B);
+    cudaFree(dev_C);
+}
 
 int main(int argc, char *argv[]) {
     srand(time(NULL));
@@ -174,14 +244,13 @@ int main(int argc, char *argv[]) {
     int m = 3;
     int B_col_count = 1;
 
-    if (3 < argc) { // only use user provided values if all three were provided
+    if (3 < argc) {
         A_row_count = confirm_input(A_row_count, argv[1]);
         m = confirm_input(m, argv[2]);
         B_col_count = confirm_input(B_col_count, argv[3]);
     }
 
-    // "matrices" are stored as 1D arrays
-    // RowCol structure is used to keep track of the row col values for each 1D array
+    // Matrices are stored as 1D arrays
     int *A = (int*)malloc((A_row_count * m) * sizeof(int));
     struct RowCol row_col_A = initalize_matrix_values(A, 1, A_row_count, m);
 
@@ -194,6 +263,9 @@ int main(int argc, char *argv[]) {
     int *C_parallel = (int*)malloc((A_row_count * B_col_count) * sizeof(int));
     struct RowCol row_col_C_parallel = initalize_matrix_values(C_parallel, 0, A_row_count, B_col_count);
 
+    int *C_parallel_inner = (int*)malloc((A_row_count * B_col_count) * sizeof(int));
+    struct RowCol row_col_C_parallel_inner = initalize_matrix_values(C_parallel_inner, 0, A_row_count, B_col_count);
+
     clock_t start_serial = clock();
     serial_multiplication(A, B, C, row_col_C, m);
     clock_t end_serial = clock();
@@ -202,16 +274,47 @@ int main(int argc, char *argv[]) {
     print_to_file(B, row_col_B, output_B_file);
     print_to_file(C, row_col_C, output_C_serial_file);
 
+    float kernel_ms = 0.0f;
     clock_t start_parallel = clock();
-    parallel_multiplication(A, B, C_parallel, row_col_C_parallel, m);
+    parallel_multiplication(A, B, C_parallel, row_col_C_parallel, m, &kernel_ms);
     clock_t end_parallel = clock();
     print_to_file(C_parallel, row_col_C_parallel, output_C_parallel_file);
 
-    printf("\nTime for (serial) multiplication: %f\n", ((double) (end_serial - start_serial)) / CLOCKS_PER_SEC);
-    printf("\nTime for (parallel) multiplication: %f\n", ((double) (end_parallel - start_parallel)) / CLOCKS_PER_SEC);
+    float kernel_inner_ms = 0.0f;
+    clock_t start_parallel_inner = clock();
+    parallel_multiplication_inner(A, B, C_parallel_inner, row_col_C_parallel_inner, m, &kernel_inner_ms);
+    clock_t end_parallel_inner = clock();
+    print_to_file(C_parallel_inner, row_col_C_parallel_inner, output_C_parallel_inner_file);
+
+    int N = A_row_count * B_col_count;
+    double serial_s   = ((double)(end_serial   - start_serial))   / CLOCKS_PER_SEC;
+    double parallel_s = ((double)(end_parallel - start_parallel)) / CLOCKS_PER_SEC;
+    double parallel_inner_s = ((double)(end_parallel_inner - start_parallel_inner)) / CLOCKS_PER_SEC;
+
+    printf("\nTime for (serial) multiplication: %f s\n", serial_s);
+    printf("Time for (parallel outer) total (compute + memcpy): %f s\n", parallel_s);
+    printf("Time for (parallel outer) kernel only: %f ms\n", kernel_ms);
+    printf("Time for (parallel inner) total (compute + memcpy): %f s\n", parallel_inner_s);
+    printf("Time for (parallel inner) kernel only: %f ms\n", kernel_inner_ms);
+
+    int mismatches_outer = compare_matrices(C, C_parallel, N);
+    int mismatches_inner = compare_matrices(C, C_parallel_inner, N);
+
+    if (mismatches_outer == 0) {
+        printf("\nCORRECTNESS (outer parallel vs serial): PASS\n");
+    } else {
+        printf("\nCORRECTNESS (outer parallel vs serial): FAIL (%d mismatches)\n", mismatches_outer);
+    }
+
+    if (mismatches_inner == 0) {
+        printf("CORRECTNESS (inner parallel vs serial): PASS\n");
+    } else {
+        printf("CORRECTNESS (inner parallel vs serial): FAIL (%d mismatches)\n", mismatches_inner);
+    }
 
     free(A);
     free(B);
     free(C);
     free(C_parallel);
+    free(C_parallel_inner);
 }
