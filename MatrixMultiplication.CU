@@ -151,7 +151,11 @@ void parallel_multiplication(int *A, int *B, int *C, struct RowCol row_col_C, in
     cudaMemcpy(dev_A, A, size_A, cudaMemcpyHostToDevice);
     cudaMemcpy(dev_B, B, size_B, cudaMemcpyHostToDevice);
 
-    kernel_dot_product<<<1, N>>>(dev_A, dev_B, dev_C, row_col_C, m);
+    // Mathematical Relation for Grid Sizing 
+    int threadsPerBlock = 256;
+    int blocksPerGrid = (N + threadsPerBlock - 1) / threadsPerBlock;
+
+    kernel_dot_product << <blocksPerGrid, threadsPerBlock >> > (dev_A, dev_B, dev_C, row_col_C, m);
 
     cudaMemcpy(C, dev_C, size_C, cudaMemcpyDeviceToHost);
 }
